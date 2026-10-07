@@ -11,43 +11,35 @@
     .header h1 { font-size: 20px; color: #38bdf8; font-weight: 700; }
     .badge { display: inline-block; background: #0284c7; color: #fff; padding: 3px 8px; border-radius: 6px; font-size: 11px; margin-bottom: 8px; }
     .card { background: #1e293b; border-radius: 12px; padding: 16px; margin-bottom: 14px; border: 1px solid #334155; }
-    .label { font-size: 13px; font-weight: 600; margin-bottom: 6px; display: block; color: #cbd5e1; }
-    .sub { font-size: 11px; color: #94a3b8; margin-bottom: 8px; display: block; }
-    .file-input { width: 100%; padding: 10px; background: #0f172a; border: 1px dashed #475569; border-radius: 8px; color: #94a3b8; font-size: 13px; }
-    .num-input { width: 100%; padding: 10px; background: #0f172a; border: 1px solid #475569; border-radius: 8px; color: #fff; font-size: 14px; margin-bottom: 6px; }
-    .btn { width: 100%; background: #0284c7; color: white; border: none; padding: 14px; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; }
+    .label { font-size: 14px; font-weight: 600; margin-bottom: 6px; display: block; color: #cbd5e1; }
+    .sub { font-size: 12px; color: #94a3b8; margin-bottom: 10px; display: block; }
+    .file-input { width: 100%; padding: 12px; background: #0f172a; border: 1px dashed #475569; border-radius: 8px; color: #94a3b8; font-size: 13px; }
+    .btn { width: 100%; background: #0284c7; color: white; border: none; padding: 15px; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; }
     .btn:active { background: #0369a1; }
-    .console-box { background: #000; border-radius: 8px; padding: 12px; font-family: monospace; font-size: 11px; color: #4ade80; height: 160px; overflow-y: auto; border: 1px solid #1e293b; margin-top: 10px; }
+    .detected-list { margin-top: 10px; max-height: 120px; overflow-y: auto; font-size: 12px; color: #94a3b8; }
+    .detected-item { padding: 4px 0; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; }
+    .dur-badge { color: #38bdf8; font-weight: 600; }
+    .console-box { background: #000; border-radius: 8px; padding: 12px; font-family: monospace; font-size: 11px; color: #4ade80; height: 160px; overflow-y: auto; border: 1px solid #1e293b; margin-top: 14px; }
   </style>
 </head>
 <body>
   <div class="header">
-    <span class="badge">V5 KineMaster Core Engine</span>
+    <span class="badge">Fully Automated Engine</span>
     <h1>AutoEditor Dashboard</h1>
   </div>
 
   <div class="card">
-    <label class="label">1. Select Images (Min. 2)</label>
-    <span class="sub">PNG, JPG, WEBP select karein</span>
+    <label class="label">Select Scene Images</label>
+    <span class="sub">Filenames se duration khud-ba-khud extract hogi (e.g. 0-05.jpg, 1-15_scene.png)</span>
     <input type="file" id="imageFiles" class="file-input" multiple accept="image/*">
+    <div id="detectedFiles" class="detected-list"></div>
   </div>
 
-  <div class="card">
-    <label class="label">2. Default Clip Duration (Seconds)</label>
-    <input type="number" id="defaultDur" class="num-input" value="3" min="1" max="15">
-  </div>
-
-  <div class="card">
-    <label class="label">3. Optional: Custom Template (.kmproject)</label>
-    <span class="sub">Agar blank chhodenge to bundled template use hoga</span>
-    <input type="file" id="templateFile" class="file-input" accept=".kmproject">
-  </div>
-
-  <button class="btn" id="exportBtn">Export KineMaster Project</button>
+  <button class="btn" id="exportBtn">⚡ Auto-Generate KineMaster Project</button>
 
   <div class="console-box" id="logBox">
-    <div>[System] AutoEditor Engine Active.</div>
-    <div>[Ready] Select images to begin.</div>
+    <div>[System] AutoEditor Filename-Parser Ready.</div>
+    <div>[Ready] Images select karein, duration automatic calculate ho jayegi.</div>
   </div>
 
   <script src="app-engine.js"></script>
@@ -65,34 +57,37 @@
       return new Uint8Array(buf);
     }
 
+    const imgInput = document.getElementById('imageFiles');
+    const detectedDiv = document.getElementById('detectedFiles');
+
+    imgInput.addEventListener('change', () => {
+      detectedDiv.innerHTML = '';
+      if (!imgInput.files || imgInput.files.length === 0) return;
+      log(`${imgInput.files.length} images detect hui.`);
+      for (const f of imgInput.files) {
+        const d = parseFilenameDuration(f.name);
+        const item = document.createElement('div');
+        item.className = 'detected-item';
+        item.innerHTML = `<span>${f.name}</span><span class="dur-badge">${d ? d + 's (from name)' : '3s (default)'}</span>`;
+        detectedDiv.appendChild(item);
+      }
+    });
+
     document.getElementById('exportBtn').addEventListener('click', async () => {
       try {
-        const imgInput = document.getElementById('imageFiles');
         if (!imgInput.files || imgInput.files.length < 2) {
-          alert("KineMaster export ke liye kam se kam 2 images select karein!");
+          alert("Kam se kam 2 images select karein!");
           return;
         }
 
-        log(`Images loaded: ${imgInput.files.length}`);
-        const defaultDur = parseFloat(document.getElementById('defaultDur').value) || 3;
+        log(`Auto pipeline start: ${imgInput.files.length} images processing...`);
 
-        let templateBuf;
-        const customTemplate = document.getElementById('templateFile').files[0];
-        if (customTemplate) {
-          log("Using custom uploaded template...");
-          templateBuf = await fileToUint8(customTemplate);
-        } else {
-          log("Fetching bundled template...");
-          const res = await fetch(imgInput.files.length === 2 ? 'kine-template-2.kmproject' : 'kine-template.kmproject');
-          if (!res.ok) throw new Error("Bundled template file nahi mila. Template browse karke select karein.");
-          const arrayBuffer = await res.arrayBuffer();
-          templateBuf = new Uint8Array(arrayBuffer);
-        }
+        const res = await fetch(imgInput.files.length === 2 ? 'kine-template-2.kmproject' : 'kine-template.kmproject');
+        if (!res.ok) throw new Error("Bundled KineMaster template load nahi ho paya.");
+        const template = new Uint8Array(await res.arrayBuffer());
 
-        log("Processing timeline binary patch...");
-        const template = templateBuf;
         const ftrx = indexOfSubarray(template, new TextEncoder().encode('FTRX'));
-        if (ftrx < 0) throw new Error("Verified KineMaster FTRX boundary not found.");
+        if (ftrx < 0) throw new Error("KineMaster FTRX boundary missing.");
 
         let chunkStart = -1;
         const view = new DataView(template.buffer, template.byteOffset, template.byteLength);
@@ -101,7 +96,7 @@
           if (n === ftrx - (p + 4)) { chunkStart = p; break; }
         }
         if (chunkStart < 0 || template[chunkStart + 4] !== 0x0a)
-          throw new Error("Verified KineMaster chunk boundary failed.");
+          throw new Error("KineMaster chunk boundary error.");
 
         const chunk = template.slice(chunkStart + 4, ftrx);
         const records = parseTopLevelRecords(chunk);
@@ -127,9 +122,9 @@
           const baseDur = i === 0 ? 5000 : (i === 1 ? 10000 : 5000);
           const internal = i < 3 ? templateInternalNames[i] : makeInternalName(i);
 
+          const autoSec = parseFilenameDuration(file.name) || 3;
           const g = new Uint8Array(baseClip);
-          const customSec = parseFilenameDuration(file.name) || defaultDur;
-          patchDuration(g, baseDur, Math.round(customSec * 1000), DURATION_OFFSETS[Math.min(i, 2)]);
+          patchDuration(g, baseDur, Math.round(autoSec * 1000), DURATION_OFFSETS[Math.min(i, 2)]);
           patchAssetReference(g, templateInternalNames[Math.min(i, 2)], internal);
 
           if (i >= 3) {
@@ -149,7 +144,7 @@
 
           groups.push(g); metas.push(m);
           assets.push({ name: internal, data: await fileToUint8(file) });
-          log(`Packed clip #${i + 1}: ${file.name} (${customSec}s)`);
+          log(`[Auto-Timeline] ${file.name} -> ${autoSec}s`);
         }
 
         const globalOffset = records.find(r => r.field === 100)?.start;
@@ -169,19 +164,18 @@
         const projectName = `${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.kmproject`;
         const entries = [{ name: projectName, data: finalProject }, ...assets.map(a => ({ name: `contents/${a.name}`, data: a.data }))];
 
-        log("Zipping project package...");
+        log("Generating KineMaster file...");
         const zipData = makeZip(entries);
 
         const blob = new Blob([zipData], { type: 'application/octet-stream' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
-        a.download = `autoeditor-kine-${Date.now()}.kine`;
+        a.download = `autoeditor-${Date.now()}.kine`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
 
-        log("COMPLETE: File downloaded successfully!");
-        alert("Export Complete! File downloaded to your phone.");
+        log("SUCCESS: KineMaster project ready!");
       } catch (err) {
         log(`ERROR: ${err.message}`);
         alert(`Error: ${err.message}`);
