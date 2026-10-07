@@ -29,7 +29,6 @@ jobs:
         mkdir -p www
         cp -r * www/ 2>/dev/null || true
         rm -rf www/www www/.git www/.github
-        # Ensure index.html exists
         if [ ! -f www/index.html ]; then
           MAIN_HTML=$(find www -maxdepth 1 -name "*.html" | head -n 1)
           if [ -n "$MAIN_HTML" ]; then
@@ -46,12 +45,18 @@ jobs:
         npx cap init AutoEditor com.autoeditor.kine --web-dir www
         npx cap add android
 
+    - name: Fix Kotlin Duplicate Classes
+      run: |
+        echo "configurations.all { resolutionStrategy.force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22' }" >> android/app/build.gradle
+        echo "configurations.all { exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7' }" >> android/app/build.gradle
+        echo "configurations.all { exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8' }" >> android/app/build.gradle
+
     - name: Build Android APK
       run: |
         npx cap sync android
         cd android
         chmod +x gradlew
-        ./gradlew assembleDebug
+        ./gradlew assembleDebug --no-daemon
 
     - name: Upload APK File
       uses: actions/upload-artifact@v4
