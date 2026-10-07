@@ -1,0 +1,277 @@
+
+function parseFilenameDuration(filename) {
+  if (!filename) return null;
+  const base = require("path").basename(String(filename)).trim();
+  // Matches 0-05, 0-05_202609041331, 1-20_abc.jpg etc.
+  const m = base.match(/^(\d+)-(\d+)(?:[_\.\s].*)?$/);
+  if (m) {
+    const mins = parseInt(m[1], 10);
+    const secs = parseInt(m[2], 10);
+    return mins * 60 + secs;
+  }
+  return null;
+}
+
+'use strict';
+const fs = require('fs');
+const path = require('path');
+
+// V5 source of truth: the 3-image KineMaster project that was verified to
+// open successfully. We extend its repeated image-clip pair.
+const TEMPLATE_2 = path.join(__dirname, 'kine-template-2.kmproject');
+const TEMPLATE_3 = path.join(__dirname, 'kine-template.kmproject');
+const ALLOWED = new Set(['.jpg','.jpeg','.png','.webp']);
+const BASE_CLIP_DURATIONS = [5000,10000,5000];
+const DURATION_OFFSETS = [[128,240],[127,240],[127,240]];
+
+function readVarint(buf, pos) {
+  let value = 0n, shift = 0n, start = pos;
+  while (pos < buf.length) {
+    const b = buf[pos++];
+    value |= BigInt(b & 0x7f) << shift;
+    if (!(b & 0x80)) return { value, start, end: pos };
+    shift += 7n;
+    if (shift > 70n) throw new Error('Invalid KineMaster varint.');
+  }
+  throw new Error('Truncated KineMaster varint.');
+}
+
+function encodeFixedVarint(value, len) {
+  value = BigInt(value);
+  if (value < 0n) throw new Error('Negative varint.');
+  const out = Buffer.alloc(len);
+  for (let i=0;i<len;i++) {
+    const low = Number(value & 0x7fn);
+    value >>= 7n;
+    out[i] = i === len-1 ? low : (low | 0x80);
+  }
+  if (value !== 0n) throw new Error('Varint does not fit the original field length.');
+  return out;
+}
+
+function patchInnerVarintField(record, fieldNo, newValue) {
+  const outerKey = readVarint(record, 0);
+  if (Number(outerKey.value >> 3n) !== 1 || Number(outerKey.value & 7n) !== 2)
+    throw new Error('Unexpected KineMaster record wrapper.');
+  const outerLen = readVarint(record, outerKey.end);
+  const innerStart = outerLen.end;
+  const innerEnd = innerStart + Number(outerLen.value);
+  if (innerEnd > record.length) throw new Error('Invalid KineMaster record length.');
+  let p = innerStart;
+  while (p < innerEnd) {
+    const key = readVarint(record,p);
+    const field = Number(key.value >> 3n);
+    const wire = Number(key.value & 7n);
+    p = key.end;
+    if (wire === 0) {
+      const val = readVarint(record,p);
+      if (field === fieldNo) {
+        const bytes = encodeFixedVarint(newValue, val.end-val.start);
+        bytes.copy(record,val.start);
+        return val.value;
+      }
+      p = val.end;
+    } else if (wire === 1) p += 8;
+    else if (wire === 2) { const len=readVarint(record,p); p=len.end+Number(len.value); }
+    else if (wire === 5) p += 4;
+    else throw new Error('Unsupported KineMaster wire type.');
+  }
+  throw new Error(`KineMaster field ${fieldNo} not found.`);
+}
+
+function readInnerVarintField(record, fieldNo) {
+  const outerKey = readVarint(record, 0);
+  const outerLen = readVarint(record, outerKey.end);
+  const innerStart = outerLen.end;
+  const innerEnd = innerStart + Number(outerLen.value);
+  let p = innerStart;
+  while (p < innerEnd) {
+    const key = readVarint(record,p);
+    const field = Number(key.value >> 3n);
+    const wire = Number(key.value & 7n);
+    p = key.end;
+    if (wire === 0) {
+      const val = readVarint(record,p);
+      if (field === fieldNo) return val.value;
+      p = val.end;
+    } else if (wire === 1) p += 8;
+    else if (wire === 2) { const len=readVarint(record,p); p=len.end+Number(len.value); }
+    else if (wire === 5) p += 4;
+    else throw new Error('Unsupported KineMaster wire type.');
+  }
+  throw new Error(`KineMaster field ${fieldNo} not found.`);
+}
+
+function patchAssetReference(record, oldName, newName) {
+  const oldBuf = Buffer.from(oldName,'utf8');
+  const newBuf = Buffer.from(newName,'utf8');
+  if (oldBuf.length !== newBuf.length)
+    throw new Error(`Internal KineMaster asset name length changed: ${oldName} -> ${newName}`);
+  const pos = record.indexOf(oldBuf);
+  if (pos < 0) throw new Error(`Asset reference ${oldName} not found in clip record.`);
+  newBuf.copy(record,pos);
+}
+
+function patchDuration(record, baseMs, durationMs, offsets) {
+  if (!Number.isFinite(durationMs) || durationMs < 1 || durationMs > 16383)
+    throw new Error(`Image duration ${durationMs} ms is outside the verified 1–16383 ms range.`);
+  const old = encodeFixedVarint(baseMs,2);
+  const val = encodeFixedVarint(durationMs,2);
+  for (const off of offsets) {
+    if (off < 0 || off + 2 > record.length || !record.subarray(off,off+2).equals(old))
+      throw new Error(`Verified KineMaster duration field changed at clip offset ${off}.`);
+    val.copy(record,off);
+  }
+}
+function crc32(buf) {
+  let c=0xffffffff;
+  for (let i=0;i<buf.length;i++) {
+    c ^= buf[i];
+    for (let k=0;k<8;k++) c=(c>>>1)^(0xedb88320&-(c&1));
+  }
+  return (c^0xffffffff)>>>0;
+}
+function u16(n){const b=Buffer.alloc(2);b.writeUInt16LE(n&0xffff,0);return b;}
+function u32(n){const b=Buffer.alloc(4);b.writeUInt32LE(n>>>0,0);return b;}
+function makeZip(entries){
+  const local=[],central=[]; let offset=0;
+  const now=new Date(), year=Math.max(1980,now.getFullYear());
+  const dosTime=(now.getHours()<<11)|(now.getMinutes()<<5)|Math.floor(now.getSeconds()/2);
+  const dosDate=((year-1980)<<9)|((now.getMonth()+1)<<5)|now.getDate();
+  for(const e of entries){
+    const name=Buffer.from(e.name,'utf8');
+    const raw=Buffer.isBuffer(e.data)?e.data:Buffer.from(e.data);
+    const crc=crc32(raw);
+    const lh=Buffer.concat([u32(0x04034b50),u16(20),u16(0),u16(0),u16(dosTime),u16(dosDate),u32(crc),u32(raw.length),u32(raw.length),u16(name.length),u16(0),name]);
+    local.push(lh,raw);
+    const ch=Buffer.concat([u32(0x02014b50),u16(20),u16(20),u16(0),u16(0),u16(dosTime),u16(dosDate),u32(crc),u32(raw.length),u32(raw.length),u16(name.length),u16(0),u16(0),u16(0),u16(0),u32(0),u32(offset),name]);
+    central.push(ch); offset += lh.length+raw.length;
+  }
+  const cd=Buffer.concat(central), body=Buffer.concat(local);
+  return Buffer.concat([body,cd,Buffer.concat([u32(0x06054b50),u16(0),u16(0),u16(entries.length),u16(entries.length),u32(cd.length),u32(body.length),u16(0)])]);
+}
+
+function parseTopLevelRecords(chunk) {
+  const records=[]; let p=0;
+  while(p<chunk.length){
+    const start=p, key=readVarint(chunk,p); p=key.end;
+    const field=Number(key.value>>3n), wire=Number(key.value&7n);
+    if(wire===2){
+      const len=readVarint(chunk,p); p=len.end+Number(len.value);
+      if(p>chunk.length) throw new Error('Invalid KineMaster top-level record.');
+    } else if(wire===0){ const v=readVarint(chunk,p); p=v.end; }
+    else if(wire===1)p+=8;
+    else if(wire===5)p+=4;
+    else throw new Error('Unsupported top-level KineMaster wire type.');
+    records.push({start,end:p,field,wire});
+    // The first global field (#100) follows the image clip/meta pairs.
+    if(field===100) break;
+  }
+  return records;
+}
+
+function makeInternalName(index) {
+  // KineMaster's verified clip reference is 21 bytes. Keep that invariant.
+  const prefix=String(index%100).padStart(2,'0');
+  const stamp=(20990101000000+index).toString().padStart(14,'0');
+  return `${prefix}_${stamp}.jpg`;
+}
+
+function createKineProject(jobDir,spec,filesMap){
+  const source=[];
+  for(const clip of (Array.isArray(spec.clips)?spec.clips:[])){
+    if(!clip || clip.gap || !clip.name) continue;
+    const filename=filesMap[clip.name];
+    if(!filename) continue;
+    if(ALLOWED.has(path.extname(filename).toLowerCase())) source.push({clip,filename});
+  }
+  if(source.length<2) throw new Error('KineMaster export requires at least 2 image clips.');
+
+  // 2 clips use the original verified V4 project; 3+ clips use the verified
+  // 3-image project as the expansion base.
+  const template=fs.readFileSync(source.length===2 ? TEMPLATE_2 : TEMPLATE_3);
+  const ftrx=template.lastIndexOf(Buffer.from('FTRX'));
+  if(ftrx<0) throw new Error('Verified KineMaster FTRX boundary not found.');
+  let chunkStart=-1, chunkLen=0;
+  for(let p=Math.max(0,ftrx-10000);p<=ftrx-4;p++){
+    const n=template.readUInt32BE(p);
+    if(n===ftrx-(p+4)){ chunkStart=p; chunkLen=n; break; }
+  }
+  if(chunkStart<0 || template[chunkStart+4]!==0x0a)
+    throw new Error('Verified KineMaster chunk boundary failed.');
+  const chunk=Buffer.from(template.subarray(chunkStart+4,ftrx));
+  const records=parseTopLevelRecords(chunk);
+  const pairRecords=records.filter(r=>r.field===1 && r.wire===2);
+  const expectedPairs=source.length===2 ? 4 : 6;
+  if(pairRecords.length!==expectedPairs)
+    throw new Error(`Verified KineMaster template record count mismatch: expected ${expectedPairs}, found ${pairRecords.length}.`);
+
+  const clip0=Buffer.from(chunk.subarray(pairRecords[0].start,pairRecords[0].end));
+  const meta0=Buffer.from(chunk.subarray(pairRecords[1].start,pairRecords[1].end));
+  const clip1=Buffer.from(chunk.subarray(pairRecords[2].start,pairRecords[2].end));
+  const meta1=Buffer.from(chunk.subarray(pairRecords[3].start,pairRecords[3].end));
+  const clip2=source.length>=3 ? Buffer.from(chunk.subarray(pairRecords[4].start,pairRecords[4].end)) : null;
+  const meta2=source.length>=3 ? Buffer.from(chunk.subarray(pairRecords[5].start,pairRecords[5].end)) : null;
+
+  const templateInternalNames=source.length===2
+    ? ['79_20260930101542.jpg','81_20260930101541.jpg']
+    : ['79_20260930101542.jpg','81_20260930101541.jpg','82_20261005000002.jpg'];
+  const groups=[];
+  const metas=[];
+  const assets=[];
+
+  for(let i=0;i<source.length;i++){
+    const baseClip=i===0?clip0:(i===1?clip1:clip2);
+    const baseMeta=i===0?meta0:(i===1?meta1:meta2);
+    if(!baseClip || !baseMeta) throw new Error('No verified KineMaster clip template is available for this image count.');
+    const baseDur=i===0?5000:(i===1?10000:5000);
+    const internal=i<3 ? templateInternalNames[i] : makeInternalName(i);
+    const g=Buffer.from(baseClip);
+    patchDuration(g,baseDur,Math.round(((parseFilenameDuration(source[i].filename) ?? Number(source[i].clip.duration)) || 3) * 1000),DURATION_OFFSETS[Math.min(i,2)]);
+    patchAssetReference(g,templateInternalNames[Math.min(i,2)],internal);
+    if(i>=3){
+      // Clone the verified 3rd pair but give its record IDs fresh values while
+      // preserving the original 10-byte varint widths.
+      const id1=readInnerVarintField(g,1);
+      const id2=readInnerVarintField(g,2);
+      patchInnerVarintField(g,1,id1+BigInt(i));
+      patchInnerVarintField(g,2,id2+BigInt(i));
+    }
+    const m=Buffer.from(baseMeta);
+    if(i>=3){
+      const id1=readInnerVarintField(m,1);
+      const id2=readInnerVarintField(m,2);
+      patchInnerVarintField(m,1,id1+BigInt(i*1000));
+      patchInnerVarintField(m,2,id2+BigInt(i*1000));
+    }
+    groups.push(g); metas.push(m);
+    const src=path.join(jobDir,source[i].filename);
+    if(!fs.existsSync(src)) throw new Error(`Missing image file: ${source[i].filename}`);
+    assets.push({name:internal,data:fs.readFileSync(src)});
+  }
+
+  const globalsStart=pairRecords[6]?.start ?? pairRecords[pairRecords.length-1].end;
+  // pairRecords includes only field #1 records before global field #100.
+  const globalOffset=records.find(r=>r.field===100)?.start;
+  if(globalOffset==null) throw new Error('KineMaster global section not found.');
+
+  const allPairs=[];
+  for(let i=0;i<source.length;i++) allPairs.push(groups[i],metas[i]);
+  const pairData=Buffer.concat(allPairs);
+  const newChunk=Buffer.concat([pairData,chunk.subarray(globalOffset)]);
+
+  const project=Buffer.concat([
+    template.subarray(0,chunkStart),
+    u32BE(newChunk.length),
+    newChunk,
+    template.subarray(ftrx)
+  ]);
+
+  const projectName=`${new Date().toISOString().slice(0,10).replace(/-/g,'')}.kmproject`;
+  const entries=[{name:projectName,data:project},...assets.map(a=>({name:`contents/${a.name}`,data:a.data}))];
+  const out=path.join(jobDir,'autoeditor-kine.kine');
+  fs.writeFileSync(out,makeZip(entries));
+  return out;
+}
+function u32BE(n){const b=Buffer.alloc(4);b.writeUInt32BE(n>>>0,0);return b;}
+module.exports={createKineProject};

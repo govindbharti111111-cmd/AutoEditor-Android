@@ -1,0 +1,43 @@
+AutoEditor for Android (via Termux)
+Runs entirely on your phone. Nothing is uploaded.
+
+SETUP
+1. Install Termux from the Google Play Store.
+2. Open Termux and give it file access (once):
+     termux-setup-storage
+3. Go to this folder (e.g. if it's in Downloads):
+     cd ~/storage/downloads/AutoEditor-android
+4. Run:
+     bash start.sh
+
+That's it. On the first run start.sh installs Node.js for you
+(one-time, needs internet), then starts the app.
+KineMaster project export does not require ffmpeg. MP4 rendering still requires
+ffmpeg; install it only if you need MP4 rendering: pkg install ffmpeg
+
+USE
+   Open  http://localhost:4000  in Chrome or Firefox on the same phone.
+   To stop: return to Termux and press Ctrl+C.
+   Next time, just run "bash start.sh" again.
+
+NOTES
+- Rendering runs on the phone's CPU; short/medium videos work best.
+- After the one-time setup, no internet is needed.
+
+KineMaster export (experimental)
+-------------------------------
+The Export panel now exports an editable KineMaster .kine project containing
+separate image clips with their timeline durations. Audio, transitions, video
+clips and motion/keyframes are intentionally not exported by this mode.
+
+Important: KineMaster's .kine/.kmproject format is proprietary. This exporter
+is built from a verified KineMaster image-only project template and should be
+tested in KineMaster before relying on it for a full workflow.
+
+
+V5 KineMaster workflow
+-----------------------
+Images are sorted by the timestamp at the start of their filename (for example
+0-00.jpg, 0-05.jpg, 0-10.jpg). Each image duration is the difference between
+its timestamp and the next image timestamp. The KineMaster exporter creates
+separate editable image clips from the verified 3-image project structure.
