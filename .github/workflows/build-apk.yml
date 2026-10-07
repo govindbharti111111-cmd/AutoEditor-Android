@@ -1,0 +1,44 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 18
+
+    - name: Set up Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'zulu'
+        java-version: '17'
+
+    - name: Install Dependencies & Setup Capacitor
+      run: |
+        npm install
+        npm install @capacitor/core @capacitor/cli @capacitor/android
+        npx cap init AutoEditor com.autoeditor.kine --web-dir public
+        npx cap add android
+
+    - name: Build Android APK
+      run: |
+        npx cap sync android
+        cd android
+        ./gradlew assembleDebug
+
+    - name: Upload APK File
+      uses: actions/upload-artifact@v4
+      with:
+        name: AutoEditor-APK
+        path: android/app/build/outputs/apk/debug/app-debug.apk
