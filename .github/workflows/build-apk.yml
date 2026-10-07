@@ -27,9 +27,17 @@ jobs:
     - name: Prepare Web Assets
       run: |
         mkdir -p www
-        # Copy web files to www folder
         cp -r * www/ 2>/dev/null || true
         rm -rf www/www www/.git www/.github
+        # Ensure index.html exists
+        if [ ! -f www/index.html ]; then
+          MAIN_HTML=$(find www -maxdepth 1 -name "*.html" | head -n 1)
+          if [ -n "$MAIN_HTML" ]; then
+            cp "$MAIN_HTML" www/index.html
+          else
+            echo '<!DOCTYPE html><html><head><title>AutoEditor</title></head><body><h1>AutoEditor Running</h1><script src="kine-export.js"></script></body></html>' > www/index.html
+          fi
+        fi
 
     - name: Install Dependencies & Setup Capacitor
       run: |
